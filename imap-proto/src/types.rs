@@ -4,6 +4,7 @@ use std::ops::RangeInclusive;
 
 pub mod acls;
 pub use acls::*;
+use bytes::BufMut;
 
 fn to_owned_cow<T: ?Sized + ToOwned>(c: Cow<'_, T>) -> Cow<'static, T> {
     Cow::Owned(c.into_owned())
@@ -51,6 +52,23 @@ pub enum Response<'a> {
     Acl(Acl<'a>),
     ListRights(ListRights<'a>),
     MyRights(MyRights<'a>),
+}
+
+fn write_number(x: impl itoa::Integer, mut b: impl BufMut) {
+    let mut buffer = itoa::Buffer::new();
+    b.put(buffer.format(x).as_bytes());
+}
+
+fn write_parenthesized_list<'a>(x: impl IntoIterator<Item = &'a str>, mut b: impl BufMut) {
+    let mut iter = x.into_iter();
+    let Some(first) = iter.next() else { return };
+    b.put(&b" ("[..]);
+    b.put(first.as_bytes());
+    for set in iter {
+        b.put(&b" "[..]);
+        b.put(set.as_bytes());
+    }
+    b.put(&b")"[..]);
 }
 
 impl<'a> Response<'a> {
@@ -108,6 +126,209 @@ impl<'a> Response<'a> {
             Response::ListRights(rights) => Response::ListRights(rights.into_owned()),
             Response::MyRights(rights) => Response::MyRights(rights.into_owned()),
         }
+    }
+
+    pub fn encode(&self, output: &mut impl BufMut) {
+        match self {
+            Response::Done {
+                tag,
+                status,
+                code,
+                information,
+            } => {
+                output.put(tag.as_bytes());
+                match status {
+                    Status::Ok => output.put(&b" OK"[..]),
+                    Status::No => output.put(&b" NO"[..]),
+                    Status::Bad => output.put(&b" BAD"[..]),
+                    Status::PreAuth => output.put(&b" PREAUTH"[..]),
+                    Status::Bye => output.put(&b" BYE"[..]),
+                }
+                if let Some(code) = code {
+                    output.put(&b"["[..]);
+                    match code {
+                        // static
+                        ResponseCode::Alert => output.put(&b"ALERT"[..]),
+                        ResponseCode::Parse => output.put(&b"PARSE"[..]),
+                        ResponseCode::ReadOnly => output.put(&b"READ-ONLY"[..]),
+                        ResponseCode::ReadWrite => output.put(&b"READ-WRITE"[..]),
+                        ResponseCode::TryCreate => output.put(&b"TRYCREATE"[..]),
+                        ResponseCode::UidNotSticky => output.put(&b"UIDNOTSTICKY"[..]),
+                        ResponseCode::MetadataTooMany => output.put(&b"METADATA TOOMANY"[..]),
+                        ResponseCode::MetadataNoPrivate => output.put(&b"METADATA NOPRIVATE"[..]),
+                        // numbers
+                        ResponseCode::HighestModSeq(n) => {
+                            output.put(&b"HIGHESTMODSEQ "[..]);
+                            write_number(*n, &mut *output);
+                        }
+                        ResponseCode::UidNext(n) => {
+                            output.put(&b"UIDNEXT "[..]);
+                            write_number(*n, &mut *output);
+                        }
+                        ResponseCode::UidValidity(n) => {
+                            output.put(&b"UIDVALIDITY "[..]);
+                            write_number(*n, &mut *output);
+                        }
+                        ResponseCode::Unseen(n) => {
+                            output.put(&b"UNSEEN "[..]);
+                            write_number(*n, &mut *output);
+                        }
+                        ResponseCode::MetadataLongEntries(n) => {
+                            output.put(&b"METADATA LONGENTRIES "[..]);
+                            write_number(*n, &mut *output);
+                        }
+                        ResponseCode::MetadataMaxSize(n) => {
+                            output.put(&b"METADATA MAXSIZE "[..]);
+                            write_number(*n, &mut *output);
+                        }
+                        // other
+                        ResponseCode::BadCharset(charset) => {
+                            output.put(&b"BADCHARSET"[..]);
+                            if let Some(charset) = charset {
+                                write_parenthesized_list(
+                                    charset.iter().map(|x| &**x),
+                                    &mut *output,
+                                );
+                            }
+                        }
+
+                        ResponseCode::Capabilities(capabilities) => {
+                            output.put(&b"CAPABILITY"[..]);
+                            for cap in capabilities {
+                                output.put(&b" "[..]);
+                                match cap {
+                                    Capability::Imap4rev1 => output.put(&b"IMAP4rev1"[..]),
+                                    Capability::Auth(auth) => {
+                                        output.put(&b"AUTH="[..]);
+                                        output.put(auth.as_bytes());
+                                    }
+                                    Capability::Atom(other) => output.put(other.as_bytes()),
+                                }
+                            }
+                        }
+                        ResponseCode::PermanentFlags(flags) => {
+                            output.put(&b"PERMANENTFLAGS"[..]);
+                            write_parenthesized_list(flags.iter().map(|x| &**x), &mut *output);
+                        }
+                        ResponseCode::AppendUid(a, b) => {
+                            output.put(&b"APPENDUID "[..]);
+                            write_number(*a, &mut *output);
+                            let mut first = true;
+                            for b in b {
+                                if first {
+                                    output.put(&b" "[..]);
+                                    first = false;
+                                } else {
+                                    output.put(&b","[..]);
+                                }
+                                match b {
+                                    UidSetMember::UidRange(r) => {
+                                        write_number(*r.start(), &mut *output);
+                                        output.put(&b":"[..]);
+                                        write_number(*r.end(), &mut *output);
+                                    }
+                                    UidSetMember::Uid(b) => {
+                                        write_number(*b, &mut *output);
+                                    }
+                                }
+                            }
+                        }
+                        ResponseCode::CopyUid(a, b, c) => {
+                            output.put(&b"COPYUID "[..]);
+                            write_number(*a, &mut *output);
+                            let mut first = true;
+                            for b in b {
+                                if first {
+                                    output.put(&b" "[..]);
+                                    first = false;
+                                } else {
+                                    output.put(&b","[..]);
+                                }
+                                match b {
+                                    UidSetMember::UidRange(r) => {
+                                        write_number(*r.start(), &mut *output);
+                                        output.put(&b":"[..]);
+                                        write_number(*r.end(), &mut *output);
+                                    }
+                                    UidSetMember::Uid(b) => {
+                                        write_number(*b, &mut *output);
+                                    }
+                                }
+                            }
+                            let mut first = true;
+                            for c in c {
+                                if first {
+                                    output.put(&b" "[..]);
+                                    first = false;
+                                } else {
+                                    output.put(&b","[..]);
+                                }
+                                match c {
+                                    UidSetMember::UidRange(r) => {
+                                        write_number(*r.start(), &mut *output);
+                                        output.put(&b":"[..]);
+                                        write_number(*r.end(), &mut *output);
+                                    }
+                                    UidSetMember::Uid(c) => {
+                                        write_number(*c, &mut *output);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    output.put(&b"]"[..]);
+                }
+                if let Some(information) = information {
+                    output.put(&b" "[..]);
+                    output.put(information.as_bytes());
+                }
+            }
+            Response::Continue { code, information } => {
+                output.put(&b"+ "[..]);
+                todo!()
+            }
+            Response::Data {
+                status,
+                code,
+                information,
+            } => {
+                output.put(&b"* "[..]);
+            }
+            Response::Capabilities(_) => {
+                output.put(&b"* CAPABILITY"[..]);
+            }
+            Response::Expunge(_) => {
+                output.put(&b"* "[..]);
+            }
+            Response::Vanished { earlier, uids } => {
+                output.put(&b"* "[..]);
+            }
+            Response::Fetch(_, _) => {
+                output.put(&b"* "[..]);
+            }
+            Response::MailboxData(_) => {
+                output.put(&b"* "[..]);
+            }
+            Response::Quota(_) => {
+                output.put(&b"* "[..]);
+            }
+            Response::QuotaRoot(_) => {
+                output.put(&b"* "[..]);
+            }
+            Response::Id(_) => {
+                output.put(&b"* "[..]);
+            }
+            Response::Acl(_) => {
+                output.put(&b"* "[..]);
+            }
+            Response::ListRights(_) => {
+                output.put(&b"* "[..]);
+            }
+            Response::MyRights(_) => {
+                output.put(&b"* "[..]);
+            }
+        }
+        output.put(&b"\r\n"[..]);
     }
 }
 

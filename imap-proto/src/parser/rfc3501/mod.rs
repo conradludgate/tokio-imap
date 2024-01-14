@@ -127,10 +127,7 @@ fn resp_text_code_parse(i: &[u8]) -> IResult<&[u8], ResponseCode> {
 
 fn resp_text_code_permanent_flags(i: &[u8]) -> IResult<&[u8], ResponseCode> {
     map(
-        preceded(
-            tag_no_case(b"PERMANENTFLAGS "),
-            parenthesized_list(map(flag_perm, Cow::Borrowed)),
-        ),
+        preceded(tag_no_case(b"PERMANENTFLAGS "), flag_list),
         ResponseCode::PermanentFlags,
     )(i)
 }
@@ -760,6 +757,25 @@ mod tests {
         // Literal non-UTF8 address
         match super::address(b"({12}\r\nJoh\xff Klensin NIL \"KLENSIN\" \"MIT.EDU\") ") {
             Ok((_, _address)) => {}
+            rsp => panic!("unexpected response {rsp:?}"),
+        }
+    }
+
+    #[test]
+    fn test_flags() {
+        match super::resp_text_code_permanent_flags(
+            b"PERMANENTFLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)",
+        ) {
+            Ok((_, flags)) => {
+                dbg!(flags);
+            }
+            rsp => panic!("unexpected response {rsp:?}"),
+        }
+
+        match super::mailbox_data_flags(b"FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)") {
+            Ok((_, flags)) => {
+                dbg!(flags);
+            }
             rsp => panic!("unexpected response {rsp:?}"),
         }
     }
